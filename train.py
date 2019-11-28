@@ -4,8 +4,8 @@ from torch.utils.data import dataloader
 import torchaudio.transforms as audio_transforms
 import torchvision.transforms as video_transforms
 
-# RETROUVER DES MODELES DE ENVNET_V2/ESC70 ENTRAINES SUR CHAINER ET LES
-# METTRE SUR PYTORCH
+import bc_learning_sound
+from bc_learning_sound.models.envnetv2_torch import EnvNetV2
 
 # TESTER EPICVIDEODATASET ET LE BRANCHER SUR 3D-RESNET (win 2)
 
@@ -29,7 +29,7 @@ video_train_transform = video_transforms.Compose([
 
 
 audio_dataset = EpicAudioDataset(
-    '../starter-kit-action-recognition/data/processed/audio_train',
+    '../starter-kit-action-recognition/data/processed/gulp/audio_train',
     transform=audio_train_transform,
     get_output_weighting=True,
     samples_per_verb=10)
@@ -41,6 +41,10 @@ audio_train_loader = dataloader.DataLoader(
     shuffle=True,
     num_workers=0,
     drop_last=True)
+
+# Load audio model
+model = EnvNetV2(70)
+model.load_chainer('/media/moreaux/a2b1d90b-93ea-4c5f-8adc-eef601253b99/results/envnet_results/esc70_ev2_strong_BC/1/model_split1.npz')
 
 for data, label, weight in audio_train_loader:
     print(data, label, weight)

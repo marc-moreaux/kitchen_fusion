@@ -28,7 +28,7 @@ class EpicAudioDataset(object):
 
         # Load the underlying dataset
         self.data_path = data_path
-        self.gd = GulpDirectory(data_path)
+        self.gd = GulpDirectory(data_path, encode_jpg=False)
         self._items = list(self.gd.merged_meta_dict.items())
         self.items = sorted([i[1]['meta_data'][0] for i in self._items],
                             key=lambda x: x['uid'])
@@ -41,8 +41,8 @@ class EpicAudioDataset(object):
         self.nouns = set(dic['noun'] for dic in self.items)
         self.verbs = set(dic['verb'] for dic in self.items)
         self.classes = self.nouns.union(self.verbs)
-        self.n_noun_classes = 200
-        self.n_verb_classes = 200
+        self.n_noun_classes = 400
+        self.n_verb_classes = 400
 
         # Select the desired amount of samples per verb-class
         self.samples_per_verb = samples_per_verb
@@ -299,7 +299,7 @@ if __name__ == '__main__':
                 RandomOpposite()])
 
     # define dataset wrapper and pick this up by the data loader interface.
-    gulp_path = '../starter-kit-action-recognition/data/processed/audio_train'
+    gulp_path = '../starter-kit-action-recognition/data/processed/gulp/audio_train'
     dataset = EpicAudioDataset(
         gulp_path,
         transform=transforms,
