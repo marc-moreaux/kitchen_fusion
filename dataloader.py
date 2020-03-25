@@ -1,16 +1,20 @@
 from gulpio import GulpDirectory
 from gulpio.dataset import GulpIOEmptyFolder
+from PIL import Image
 import numpy as np
+import pandas as pd
+import random
 import torch
 import collections
 from torch.utils.data import dataloader
-from torchaudio.transforms import (Compose, RandomStretch, Scale, Pad,
-                                   RandomCrop, RandomOpposite, ToTensor)
+import torchaudio.transforms as audio_transforms
+import torchvision.transforms as video_transforms
 
 
 class EpicAudioDataset(object):
 
     def __init__(self, data_path,
+                 is_val=False,
                  transform=None,
                  get_output_weighting=False,
                  samples_per_verb=-1):
@@ -35,22 +39,27 @@ class EpicAudioDataset(object):
         self.num_chunks = self.gd.num_chunks
 
         # Copy parameters
+        self.get_output_weighting = get_output_weighting
         self.transform = transform
+        self.is_val = is_val
 
         # Get the class names
-        self.nouns = set(dic['noun'] for dic in self.items)
-        self.verbs = set(dic['verb'] for dic in self.items)
-        self.classes = self.nouns.union(self.verbs)
-        self.n_noun_classes = 400
-        self.n_verb_classes = 400
+        nouns = pd.read_csv('./EPIC_noun_classes.csv')
+        verbs = pd.read_csv('./EPIC_verb_classes.csv')
+        self.nouns = list(nouns['nouns'])
+        self.verbs = list(verbs['verbs'])
+        self.classes = self.verbs.copy()
+        self.classes.append(self.verbs)
+        self.n_noun_classes = len(nouns)
+        self.n_verb_classes = len(verbs)
 
         # Select the desired amount of samples per verb-class
         self.samples_per_verb = samples_per_verb
         self._select_verb_samples()
 
         # Set the class weighting
-        self._set_weigthing()
-        self.get_output_weighting = get_output_weighting
+        if get_output_weighting:
+            self._set_weigthing()
 
         # Count the amout of samples per class
         self.verb_counter = collections.Counter(
@@ -84,8 +93,8 @@ class EpicAudioDataset(object):
             audio = self.transform(audio)
 
         # Labels
-        verb_target_idx = self.items[index]['verb_class']
         noun_target_idx = self.items[index]['noun_class']
+        verb_target_idx = self.items[index]['verb_class']
         labels = verb_target_idx, noun_target_idx
 
         # Weighting
@@ -122,16 +131,22 @@ class EpicAudioDataset(object):
         """
         if self.samples_per_verb <= 0:
             return
+
         items_keep = []
         count_track = [0] * self.n_verb_classes
         for meta in sorted(self.items,
                            key=lambda x: x['verb_class']):
             if count_track[meta['verb_class']] < self.samples_per_verb:
                 count_track[meta['verb_class']] += 1
-                items_keep.append(meta)
+                if not self.is_val:
+                    items_keep.append(meta)
+            else:
+                if self.is_val:
+                    items_keep.append(meta)
         self.items = items_keep
 
     def __repr__(self):
+        tmp = '{} elements\n'.format(len(self.items))
         tmp = collections.Counter([meta['verb'] for meta in self.items])
         tmp = str(tmp)[9:-2].replace("'", '')
         _str = tmp + '\n'
@@ -196,11 +211,14 @@ class EpicVideoDataset(EpicAudioDataset):
         self.random_offset = random_offset
 
         # Get the class names
-        self.nouns = set(dic['noun'] for dic in self.items)
-        self.verbs = set(dic['verb'] for dic in self.items)
-        self.classes = self.nouns.union(self.verbs)
-        self.n_noun_classes = 200
-        self.n_verb_classes = 200
+        nouns = pd.read_csv('./EPIC_noun_classes.csv')
+        verbs = pd.read_csv('./EPIC_verb_classes.csv')
+        self.nouns = list(nouns['nouns'])
+        self.verbs = list(verbs['verbs'])
+        self.classes = self.verbs.copy()
+        self.classes.append(self.verbs)
+        self.n_noun_classes = len(nouns)
+        self.n_verb_classes = len(verbs)
 
         # Select the desired amount of samples per verb-class
         self.samples_per_verb = samples_per_verb
@@ -211,10 +229,11 @@ class EpicVideoDataset(EpicAudioDataset):
         self.get_output_weighting = get_output_weighting
 
         # Count the amout of samples per class
-        self.verb_counter = collections.Counter(
-            [meta['verb'] for meta in self.items])
-        self.noun_counter = collections.Counter(
-            [meta['noun'] for meta in self.items])
+        if not is_val:
+            self.verb_counter = collections.Counter(
+                [meta['verb'] for meta in self.items])
+            self.noun_counter = collections.Counter(
+                [meta['noun'] for meta in self.items])
 
         if self.num_chunks == 0:
             raise(GulpIOEmptyFolder("Found 0 data binaries in subfolders " +
@@ -232,7 +251,6 @@ class EpicVideoDataset(EpicAudioDataset):
         meta = self.items[index]
         gd_id = meta['uid']
         frames, item_info = self.gd[gd_id]
-        frames = item_info['frame_info']
         num_frames = len(frames)
 
         # set number of necessary frames
@@ -258,13 +276,29 @@ class EpicVideoDataset(EpicAudioDataset):
             # Pad last frame if video is shorter than necessary
             frames.extend([frames[-1]] * (num_frames_necessary - num_frames))
 
-        # augmentation
-        if self.transform_video:
-            frames = self.transform_video(frames)
+        # Data augmentation per frame
+        seed = np.random.randint(2147483647)
+        random.seed(seed)  # apply this seed to img transforms
+        if self.transform is not None:
+            old_frames = frames
+            frames = []
+            for frame in old_frames:
+                frame = Image.fromarray(frame)
+                frames.append(self.transform(frame))
+
+        # Data augmentation per class
+        seed = np.random.randint(2147483647)
+        random.seed(seed) # apply this seed to target transforms
+        if self.target_transform is not None:
+            old_frames = frames
+            frames = []
+            for frame in old_frames:
+                frame = Image.fromarray(frame)
+                frames.append(self.target_transform(frame))
 
         # format data to torch tensor
         if self.stack:
-            frames = np.stack(frames)
+            frames = torch.stack(frames, -3)
 
         # Labels
         verb_target_idx = self.items[index]['verb_class']
@@ -286,26 +320,142 @@ class EpicVideoDataset(EpicAudioDataset):
         return len(self.items)
 
 
+def get_audio_data(input_length=66650,
+                   gulp_path=('../starter-kit-action-recognition/'
+                              'data/processed/gulp/')):
+    '''Create train and valid audio datasets
+    '''
+    train_transform = audio_transforms.Compose([
+        audio_transforms.ToTensor(),
+        audio_transforms.StereoToMono(),
+        audio_transforms.RandomStretch(1.25),
+        audio_transforms.Scale(2 ** 16 / 2),
+        audio_transforms.Pad(input_length // 2),
+        audio_transforms.RandomCrop(input_length),
+        audio_transforms.RandomOpposite(),
+        audio_transforms.AddDimension(1)])
+
+    valid_transform = audio_transforms.Compose([
+        audio_transforms.ToTensor(),
+        audio_transforms.StereoToMono(),
+        audio_transforms.Scale(2 ** 16 / 2),
+        audio_transforms.Pad(input_length // 2),
+        audio_transforms.RandomCrop(input_length),
+        audio_transforms.AddDimension(1)])
+
+    train_dataset = EpicAudioDataset(
+        gulp_path + '/audio_train',
+        transform=train_transform,
+        get_output_weighting=True,
+        samples_per_verb=100)
+
+    valid_dataset = EpicAudioDataset(
+        gulp_path + '/audio_train',
+        transform=valid_transform,
+        is_val=True,
+        samples_per_verb=100)
+
+    train_loader = dataloader.DataLoader(
+        train_dataset,
+        batch_size=5,
+        shuffle=True,
+        num_workers=0,
+        drop_last=True)
+
+    valid_loader = dataloader.DataLoader(
+        valid_dataset,
+        batch_size=10,
+        shuffle=False,
+        num_workers=0,
+        drop_last=True)
+
+    audios = {'train_dataset': train_dataset,
+              'train_loader':train_loader,
+              'valid_dataset':valid_dataset,
+              'valid_loader':valid_loader}
+
+    return audios
+
+
+def get_video_data(gulp_path=('/media/moreaux/'
+                              '82de644c-4c83-4f50-a60d-177c45516105/datasets/'
+                              'Epic_kitchens/3h91syskeag572hl6tvuovwv4d/data/'
+                              'processed/gulp/')):
+    '''Create train and valid video datasets
+    '''
+    train_transform = video_transforms.Compose([
+        video_transforms.RandomResizedCrop(112),
+        video_transforms.RandomGrayscale(),
+        video_transforms.RandomVerticalFlip(),
+        video_transforms.ToTensor(),
+        video_transforms.Normalize([0.485, 0.456, 0.406],
+                                   [0.229, 0.224, 0.225]),
+    ])
+
+    valid_transform = video_transforms.Compose([
+        video_transforms.RandomResizedCrop(112),
+        video_transforms.ToTensor(),
+        video_transforms.Normalize([0.485, 0.456, 0.406],
+                                   [0.229, 0.224, 0.225]),
+    ])
+
+    train_dataset = EpicVideoDataset(
+        gulp_path + 'rgb_train',
+        num_frames=16,
+        step_size=1,
+        is_val=False,
+        transform=train_transform,
+        get_output_weighting=True,
+        samples_per_verb=100)
+
+    valid_dataset = EpicVideoDataset(
+        gulp_path + 'rgb_train',
+        num_frames=16,
+        step_size=1,
+        is_val=True,
+        transform=valid_transform,
+        samples_per_verb=100)
+
+    train_loader = dataloader.DataLoader(
+        train_dataset,
+        batch_size=15,
+        shuffle=True,
+        num_workers=0,
+        drop_last=True)
+
+    valid_loader = dataloader.DataLoader(
+        valid_dataset,
+        batch_size=20,
+        shuffle=False,
+        num_workers=0,
+        drop_last=True)
+
+    videos = {'train_dataset': train_dataset,
+              'train_loader': train_loader,
+              'valid_dataset': valid_dataset,
+              'valid_loader': valid_loader}
+
+    return videos
+
 
 if __name__ == '__main__':
-    # Define transformations
-    input_length = 44100
-    transforms = Compose([
-                ToTensor(),
-                RandomStretch(1.25),
-                Scale(2 ** 16 / 2),
-                Pad(input_length // 2),
-                RandomCrop(input_length),
-                RandomOpposite()])
+    gulp_path = '../starter-kit-action-recognition/data/processed/gulp/'
 
-    # define dataset wrapper and pick this up by the data loader interface.
-    gulp_path = '../starter-kit-action-recognition/data/processed/gulp/audio_train'
+    # Test audio
+    input_length = 44100
+    audio_transform = audio_transforms.Compose([
+        audio_transforms.ToTensor(),
+        audio_transforms.RandomStretch(1.25),
+        audio_transforms.Scale(2 ** 16 / 2),
+        audio_transforms.Pad(input_length // 2),
+        audio_transforms.RandomCrop(input_length),
+        audio_transforms.RandomOpposite()])
+
     dataset = EpicAudioDataset(
-        gulp_path,
-        transform=transforms,
+        gulp_path + 'audio_train',
+        transform=audio_transform,
         get_output_weighting=True,
         samples_per_verb=15)
-    print(dataset)
 
     train_loader = dataloader.DataLoader(
         dataset,
@@ -317,3 +467,30 @@ if __name__ == '__main__':
     for data, label, weight in train_loader:
         print(data, label, weight)
         break
+
+    # Test video
+    video_transform = video_transforms.Compose([
+        video_transforms.RandomResizedCrop(224),
+        video_transforms.RandomGrayscale(),
+        video_transforms.RandomVerticalFlip(),
+        video_transforms.ToTensor(),
+        video_transforms.Normalize([0.485, 0.456, 0.406],
+                                   [0.229, 0.224, 0.225])
+    ])
+
+    dataset = EpicVideoDataset(
+        gulp_path + 'rgb_test_seen',
+        num_frames=16,
+        step_size=1,
+        is_val=False,
+        transform=video_transform,
+        get_output_weighting=True,
+        samples_per_verb=15)
+    print(dataset)
+
+    train_loader = dataloader.DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=0,
+        drop_last=True)
